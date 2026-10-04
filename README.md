@@ -310,7 +310,20 @@ Import into a fresh installation has not yet been tested.
 
 ### Visual walkthrough
 
-The Mermaid diagrams above are GitHub-rendered ****static diagrams****, not actual animation. An animated GIF can later be committed and embedded once recorded from the working system. Dashboard screenshots have been reviewed during development, but screenshot assets and animations are not yet committed to this repository.
+The Mermaid diagrams above are GitHub-rendered ****static diagrams****, not actual animation. An animated GIF can later be committed and embedded once recorded from the working system.
+
+### Driver comparison
+
+Bahrain Race with VER, NOR, and HAM selected. Season totals remain unchanged.
+
+![Driver comparison dashboard](docs/screenshots/driver-comparison.png)
+
+### Data quality
+
+Season-wide missing or nonpositive lap durations: **100**.
+This card remains independent of session and driver filters.
+
+![Data quality dashboard](docs/screenshots/data-quality.png)
 
 ## Project structure
 

@@ -1,0 +1,14 @@
+cassandra-driver==3.29.1
+certifi==2026.5.20
+charset-normalizer==3.4.7
+click==8.4.2
+geomet==0.2.1.post1
+idna==3.16
+kafka-python-ng==2.2.3
+psycopg2-binary==2.9.9
+py4j==0.10.9.7
+pyspark==3.4.1
+python-dotenv==1.0.0
+requests==2.31.0
+six==1.17.0
+urllib3==2.7.0

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.venv/
+venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# Local secrets
+.env
+.env.*
+**/.env
+docker/superset.env
+!.env.example
+!**/.env.example
+
+# Generated data and logs
+*.csv
+*.parquet
+logs/
+data/
+output/
+
+# Extracted Java package metadata
+META-INF/

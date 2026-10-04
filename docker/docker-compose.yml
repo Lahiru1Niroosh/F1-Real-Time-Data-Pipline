@@ -1,0 +1,205 @@
+services:
+
+  # ─── KAFKA (KRaft mode) ──────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: f1_kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: EXTERNAL://0.0.0.0:9092,INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: EXTERNAL://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - f1_network
+    healthcheck:
+      test: kafka-broker-api-versions --bootstrap-server localhost:9092
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  
+
+  # ─── POSTGRESQL ──────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    container_name: f1_postgres
+    environment:
+      POSTGRES_DB: f1_db
+      POSTGRES_USER: f1_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in root .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - f1_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U f1_user -d f1_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── CASSANDRA ───────────────────────────────────────────
+  cassandra:
+    image: cassandra:4.1
+    container_name: f1_cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: f1_cluster
+      CASSANDRA_DC: datacenter1
+      JVM_OPTS: "-Xms768m -Xmx768m"
+      MAX_HEAP_SIZE: "768M"
+      HEAP_NEWSIZE: "200M"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    networks:
+      - f1_network
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    mem_limit: 1500m
+
+  # ─── AIRFLOW WEBSERVER ───────────────────────────────────
+  airflow-webserver:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.airflow
+    image: f1-airflow-custom:latest
+    container_name: f1_airflow_web
+    depends_on:
+      - postgres
+      - kafka
+      - cassandra
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__PARALLELISM: "2"
+      AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "1"
+      AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: "1"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      AIRFLOW__WEBSERVER__WORKERS: "1"
+      AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "300"
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?Set AIRFLOW_ADMIN_PASSWORD in root .env}
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      POSTGRES_HOST: "postgres"
+      CASSANDRA_HOST: "cassandra"
+      SPARK_CHECKPOINT_DIR: "/opt/airflow/checkpoints/f1_lap_data"
+      SPARK_LOCAL_IP: "127.0.0.1"
+    volumes:
+      - ../orchestration/dags:/opt/airflow/dags
+      - ../processing:/opt/airflow/processing
+      - ../ingestion:/opt/airflow/ingestion
+      - airflow_logs:/opt/airflow/logs
+      - spark_checkpoints:/opt/airflow/checkpoints
+      - ../.env:/opt/airflow/ingestion/.env
+      - ../.env:/opt/airflow/processing/.env
+    command: webserver
+    mem_limit: 1500m
+    networks:
+      - f1_network
+
+  # ─── AIRFLOW SCHEDULER ───────────────────────────────────
+  airflow-scheduler:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.airflow
+    image: f1-airflow-custom:latest
+    container_name: f1_airflow_scheduler
+    depends_on:
+      - postgres
+      - kafka
+      - cassandra
+    restart: unless-stopped
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__PARALLELISM: "2"
+      AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "1"
+      AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: "1"
+      AIRFLOW__SCHEDULER__SCHEDULER_HEALTH_CHECK_THRESHOLD: "60"
+      AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: "10"
+      AIRFLOW__SCHEDULER__PARSING_PROCESSES: "1"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      POSTGRES_HOST: "postgres"
+      CASSANDRA_HOST: "cassandra"
+      SPARK_CHECKPOINT_DIR: "/opt/airflow/checkpoints/f1_lap_data"
+      SPARK_LOCAL_IP: "127.0.0.1"
+    volumes:
+      - ../orchestration/dags:/opt/airflow/dags
+      - ../processing:/opt/airflow/processing
+      - ../ingestion:/opt/airflow/ingestion
+      - airflow_logs:/opt/airflow/logs
+      - spark_checkpoints:/opt/airflow/checkpoints
+      - ../.env:/opt/airflow/ingestion/.env
+      - ../.env:/opt/airflow/processing/.env
+    command: scheduler
+    mem_limit: 1400m
+    networks:
+      - f1_network
+
+  superset:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset
+    image: f1-superset-custom:6.1.0
+    container_name: f1_superset
+    ports:
+      - "8088:8088"
+    env_file:
+      - superset.env
+    environment:
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+    volumes:
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+      - superset_home:/app/superset_home
+    command:
+      - /app/.venv/bin/gunicorn
+      - --bind
+      - 0.0.0.0:8088
+      - --workers
+      - "1"
+      - --threads
+      - "2"
+      - --timeout
+      - "180"
+      - superset.app:create_app()
+    mem_limit: 1500m
+    networks:
+      - f1_network
+
+volumes:
+  kafka_data:
+  postgres_data:
+  cassandra_data:
+  airflow_logs:
+  spark_checkpoints:
+  superset_home:
+
+networks:
+  f1_network:
+    driver: bridge

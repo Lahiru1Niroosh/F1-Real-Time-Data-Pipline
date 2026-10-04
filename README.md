@@ -1,506 +1,359 @@
-# 🏎️ F1 Data Engineering & Analytics Platform
+<div align="center">
 
-**A full-season Formula 1 data pipeline built with Python, Kafka, PostgreSQL, Spark Structured Streaming, Cassandra, Airflow, Docker, and Apache Superset.**
+# F1 Data Engineering & Analytics Platform
+
+### A season of racing. Two data paths. One analytical workspace.
+
+Historical Formula 1 data transformed into a queryable platform with API ingestion, Kafka messaging, Spark processing, Airflow orchestration, and interactive Superset analytics.
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
-![Airflow](https://img.shields.io/badge/Airflow-2.9.3-017CEE?logo=apacheairflow&logoColor=white)
+![Kafka](https://img.shields.io/badge/Kafka-KRaft-231F20?logo=apachekafka&logoColor=white)
 ![Spark](https://img.shields.io/badge/Spark-3.4.1-E25A1C?logo=apachespark&logoColor=white)
-![Kafka](https://img.shields.io/badge/Apache-Kafka-231F20?logo=apachekafka)
+![Airflow](https://img.shields.io/badge/Airflow-2.9.3-017CEE?logo=apacheairflow&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-4169E1?logo=postgresql&logoColor=white)
+![Cassandra](https://img.shields.io/badge/Cassandra-4.1-1287B1?logo=apachecassandra&logoColor=white)
+![Superset](https://img.shields.io/badge/Superset-6.1.0-20A6C9?logo=apachesuperset&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
-![Status](https://img.shields.io/badge/Pipeline-verified-success)
-![Dashboard](https://img.shields.io/badge/Dashboard-validated-success)
 
-> ****Current status:**** full-season ingestion and processing verified; interactive Superset dashboard completed and manually checked. Dashboard export and environment examples are committed. Grafana is a planned extension, not an implemented component.
->
-> Historical data is processed through streaming infrastructure in finite runs. This project does not currently provide live race monitoring.
+[Architecture](#architecture) · [Dashboard](#dashboard) · [Run locally](#run-locally) · [Verification](#verification) · [Engineering roadmap](#engineering-roadmap)
 
-## Contents
+</div>
 
-- [Project purpose](#project-purpose)
-- [Verified results](#verified-results)
-- [System architecture](#system-architecture)
-- [Orchestration and recovery](#orchestration-and-recovery)
-- [Technology stack](#technology-stack)
-- [Data model](#data-model)
-- [Transformation rules](#transformation-rules)
-- [Analytics dashboard](#analytics-dashboard)
-- [Project structure](#project-structure)
-- [Local setup](#local-setup)
-- [Daily startup and shutdown](#daily-startup-and-shutdown)
-- [Validation](#validation)
-- [Known limitations](#known-limitations)
-- [Roadmap](#roadmap)
+---
 
-## Project purpose
+## The platform at a glance
 
-F1 timing data arrives as API responses rather than a ready-to-query analytical database. This platform fetches historical sessions, drivers, and laps, publishes records to Kafka, and builds two storage paths:
+| Season coverage | Relational records | Processed laps | Duration exceptions |
+|:---:|:---:|:---:|:---:|
+| **24 races + 6 sprints** | **29,052** | **28,952** | **100** |
+| 2024 season | PostgreSQL | Cassandra `lap_telemetry` | Missing or nonpositive duration |
 
-1. ****PostgreSQL:**** relational session, driver, and lap records for SQL analysis and Superset dashboards.
-2. ****Cassandra:**** processed valid laps and lap-duration differences produced by Spark.
+**Status:** the full-season pipeline ran successfully; the Superset dashboard was manually checked, exported, and documented. Dashboard and Airflow screenshots are included below.
 
-Airflow coordinates execution, Docker packages the dependencies, and persisted volumes retain data across container stops and restarts.
+**Execution model:** historical OpenF1 data is replayed through streaming infrastructure in bounded runs. Live race monitoring is a future extension.
 
-The engineering focus is API ingestion, rate-limit handling, decoupled messaging, SQL modeling, finite streaming execution, duplicate handling, checkpoint recovery, and reconciliation between storage systems.
+## Why this project
 
-## Verified results
+Race timing is useful only when its records can be collected reliably, related correctly, and interpreted in context. This project turns OpenF1 API responses into two complementary data products:
 
-Results below were observed for the 2024 season run `full_season_2024_20261002` on 1 October 2026 UTC.
+- **A relational analytics layer** for season coverage, driver pace, lap progression, sector comparison, and data-quality inspection.
+- **A processed lap layer** for positive-duration telemetry and batch-scoped lap-duration comparisons.
 
-| Verification | Observed result |
-|---|---:|
-| Grand Prix race sessions with stored laps | 24 |
-| Sprint sessions with stored laps | 6 |
-| Total sessions with stored laps | 30 |
-| PostgreSQL lap records | 29,052 |
-| PostgreSQL laps with positive duration | 28,952 |
-| Cassandra `lap_telemetry` records | 28,952 |
-| Records excluded by the positive-duration rule | 100 |
-| Airflow producer task | Success |
-| Airflow consumer task | Success |
-| Airflow Spark task | Success |
+The work connects practical data engineering concerns—API pacing, container networking, message replay, data grain, checkpoint recovery, and storage reconciliation—with a usable BI dashboard.
 
-The successful Spark batch read ****67,152 valid lap messages****, including replays from earlier producer attempts, and reported ****28,952 lap writes after batch-level deduplication****. It also reported 28,952 gap writes; that is not a verified count of distinct rows in `race_gaps`.
+## Dashboard
 
-****What this proves:**** observed season coverage, successful task execution, and matching valid-lap counts across PostgreSQL and Cassandra.
+### Driver performance workspace
 
-****What it does not prove:**** row-by-row equality, exactly-once delivery across all components, production readiness, or continued completeness as source data changes.
+Choose a race or sprint, select drivers, and compare their recorded timing behavior. Season totals remain visible above the analysis.
 
-## System architecture
+![F1 driver comparison dashboard](docs/screenshots/driver-comparison.png)
 
-GitHub renders the following Mermaid diagrams directly. They illustrate data flow; arrows are not an assertion that all stages execute concurrently.
-
-```mermaid
-flowchart TD
-    API["OpenF1 historical API"] --> P["Python producer\nSessions • drivers • laps"]
-    P --> K["Kafka\nf1_lap_data"]
-    K --> C["Python consumer"]
-    K --> S["Spark Structured Streaming\nAvailableNow"]
-    C --> PG["PostgreSQL\nRelational records"]
-    S --> CA["Cassandra\nProcessed lap records"]
-    PG --> SU["Superset\nSeason and driver analytics"]
-    CA -. Planned .-> G["Grafana\nProcessed-data dashboard"]
-    A["Airflow\nExecution and retries"] -. Coordinates .-> P
-    A -. Coordinates .-> C
-    A -. Coordinates .-> S
-```
-
-### Container networking
-
-```mermaid
-flowchart TD
-    HOST["Windows host\nVS Code • PowerShell • browser"]
-    subgraph NET["Docker Compose: f1_network"]
-        K["kafka:29092"]
-        PG["postgres:5432"]
-        CA["cassandra:9042"]
-        AF["Airflow webserver + scheduler"]
-        SU["Superset:8088"]
-        AF --> K
-        AF --> PG
-        AF --> CA
-        SU --> PG
-    end
-    HOST -->|"localhost:8080"| AF
-    HOST -->|"localhost:8088"| SU
-    HOST -->|"localhost:9092"| K
-    HOST -->|"localhost:5432"| PG
-```
-
-Container clients use service names. `localhost` inside a container refers to that container, not the Windows host. Kafka has separate advertised listeners for host and container clients.
-
-## Orchestration and recovery
-
-The DAG is manually triggered, has catchup disabled, and permits one active run. Its dependency order is:
-
-```mermaid
-flowchart TD
-    START["Manual trigger"] --> P["run_producer"]
-    P -->|Success| C["run_consumer"]
-    C -->|Success| S["run_spark_streaming"]
-    S -->|Success| DONE["Completed run"]
-    P -->|Failure| R["Airflow retry\nConfigured delay: 2 minutes"]
-    C -->|Failure| R
-    S -->|Failure| R
-    R --> DEC["Retry the failed task"]
-    DEC -. After exhausted retries .-> FIX["Inspect logs • fix cause\nClear only affected tasks"]
-```
-
-```mermaid
-sequenceDiagram
-    participant A as Airflow
-    participant P as Producer
-    participant K as Kafka
-    participant D as Storage tasks
-    A->>P: Start producer
-    P->>P: Fetch sessions and session-wide laps
-    P->>K: Publish JSON messages
-    P-->>A: Exit successfully
-    A->>D: Start PostgreSQL consumer
-    D->>K: Poll topic
-    D->>D: Insert relational records
-    D-->>A: Exit after empty polls
-    A->>D: Start Spark task
-    D->>K: Read available offsets
-    D->>D: Filter, deduplicate, write Cassandra
-    D->>D: Persist completed offsets in checkpoint
-    D-->>A: Exit successfully
-```
-
-The producer uses bounded HTTP waits, pacing, and retries. Fetching laps once per session reduces requests compared with requesting each driver's laps individually.
-
-Spark uses `AvailableNow` to process the offsets available at startup and terminate. A named checkpoint volume supports recovery. An unsuccessful batch can be replayed, so sink writes must tolerate replay; checkpoints alone do not guarantee exactly-once external writes.
-
-## Technology stack
-
-| Technology | Version/configuration | Responsibility |
+| View | What it answers | Calculation / treatment |
 |---|---|---|
-| Python | 3.11 | Ingestion and database clients |
-| OpenF1 | REST API | Historical F1 source |
-| Kafka | Confluent image 7.4.0; single-node KRaft | Message buffering |
-| PostgreSQL | 15 | Relational storage |
-| Spark | 3.4.1; `local[1]`; 512 MB driver heap | Lap transformations |
-| Java | 17 | Spark runtime |
-| Cassandra | 4.1 | Processed-data storage |
-| Airflow | 2.9.3, Python 3.11; LocalExecutor | Orchestration |
-| Superset | 6.1.0; custom PostgreSQL driver image | Analytics dashboard |
-| Docker Compose | Local Linux containers | Service lifecycle and networking |
-| Windows / WSL2 | Docker Desktop backend | Development host |
+| **Median lap time** | How does each driver's typical recorded lap duration compare? | Median positive duration; pit out-laps excluded; all session drivers |
+| **Lap-time progression** | How do selected drivers' lap durations change through the session? | Average duration by driver and lap number; positive durations; slow laps and pit out-laps retained |
+| **Sector comparison** | Where do selected drivers differ across the three sectors? | Median positive sector values; positive lap duration; pit out-laps excluded |
+| **Lap-time consistency** | How much does the middle half of each driver's timings vary? | Interquartile range of positive lap durations; pit out-laps excluded |
 
-The Windows Python environment and the container Python environments are separate. Docker commands do not require activation of the Windows virtual environment. Moving the terminal from WSL to PowerShell does not remove Docker Desktop's Linux/WSL2 resource overhead.
+**Reading the results:** lower timing spread means less variation, not necessarily greater speed. Sector medians can come from different laps. Weather, traffic, safety cars, interruptions, and pit activity affect the comparisons.
 
-## Data model
+### Filters with deliberate scope
 
-### PostgreSQL
-
-```mermaid
-erDiagram
-    sessions ||--o{ drivers : contains
-    sessions ||--o{ lap_times : contains
-    sessions {
-        int session_key PK
-        string session_name
-        string session_type
-        string country_name
-        string circuit_name
-        timestamp date_start
-        int year
-    }
-    drivers {
-        int driver_id PK
-        int session_key FK
-        int driver_number
-        string full_name
-        string name_acronym
-        string team_name
-        string country_code
-    }
-    lap_times {
-        int lap_id PK
-        int session_key FK
-        int driver_number
-        int lap_number
-        float lap_duration
-        float duration_sector_1
-        float duration_sector_2
-        float duration_sector_3
-        boolean is_pit_out_lap
-        timestamp date_start
-    }
-```
-
-| Table | Grain | Uniqueness |
+| Control | Applies to | Saved default |
 |---|---|---|
-| `sessions` | One session | `session_key` |
-| `drivers` | One driver in one session | `(session_key, driver_number)` |
-| `lap_times` | One numbered lap for a driver in a session | `(session_key, driver_number, lap_number)` |
+| **Race / Sprint Session** | All four performance views | Bahrain Race; single selection |
+| **Compare Drivers** | Progression, sectors, and consistency | VER, NOR, HAM; multiple selection |
+| **Season cards and quality card** | Remain independent of both controls | Whole-season counts |
 
-Join drivers to laps using ****both session key and driver number****. Driver number alone can duplicate rows across sessions.
+The median chart retains every driver in the selected session. Featured-driver portraits are static reference cards; they do not change with filters. Team labels refer to 2024, while image URLs may return current portraits.
 
-PostgreSQL stores timestamps without a timezone. Source timestamps originate from OpenF1; consumers should explicitly document and preserve their time interpretation.
+### Data quality workspace
 
-### Cassandra
+The second tab keeps the duration-completeness check visible and explains the difference between recorded and processed laps.
 
-- Keyspace: `f1_data`.
-- `lap_telemetry`: valid lap durations, sector durations, driver/session identifiers, out-lap flags, and start times.
-- `race_gaps`: driver lap durations and their difference from the fastest duration on that numbered lap in the processed batch.
+![F1 data quality dashboard](docs/screenshots/data-quality.png)
 
-Cassandra table definitions must exist before Spark writes. Review the actual deployed schema rather than treating PostgreSQL constraints as Cassandra constraints.
+**100 records remain in PostgreSQL for inspection.** Spark excludes missing or nonpositive lap durations from the processed Cassandra lap layer. A positive duration is a basic completeness rule; it does not guarantee representative racing pace.
 
-## Transformation rules
+## Architecture
 
 ```mermaid
 flowchart TD
-    RAW["Kafka JSON records"] --> TYPE{"type = lap?"}
-    TYPE -->|No| SKIP["Exclude from lap transformation"]
-    TYPE -->|Yes| VALID{"Duration present and > 0?"}
-    VALID -->|No| SKIP
-    VALID -->|Yes| DEDUP["Deduplicate within batch\nsession + driver + lap"]
-    DEDUP --> FAST["Fastest duration\nper session and lap number"]
-    FAST --> WRITE["Small Cassandra write batches"]
-    WRITE --> LAP["lap_telemetry"]
-    WRITE --> GAP["race_gaps"]
+    API["OpenF1 historical API"] --> P["Python producer"]
+    P --> K["Kafka: f1_lap_data"]
+    K --> C["Python consumer"]
+    K --> S["Spark Structured Streaming"]
+    C --> PG["PostgreSQL: relational records"]
+    S --> CA["Cassandra: processed laps"]
+    PG --> BI["Superset: season and driver analytics"]
+    A["Airflow: task execution and retries"] -. Coordinates .-> P
+    A -. Coordinates .-> C
+    A -. Coordinates .-> S
 ```
 
-- Duration values are measured in ****seconds****.
-- A positive lap duration is a basic completeness rule, not proof of an uninterrupted or representative race lap.
-- Batch deduplication is not a global, cross-run deduplication ledger.
-- Current Cassandra write settings use small unlogged batches and a 60-second client request timeout to reduce the write pressure observed on the development laptop.
-- Lap-time difference is calculated as:
+The arrows describe data dependencies. The current DAG executes the producer, consumer, and Spark task **sequentially**, rather than running them as a continuously active concurrent system.
+
+### Design decisions
+
+| Decision | Purpose | Practical boundary |
+|---|---|---|
+| Session-wide API lap requests | Reduce request volume relative to per-driver fetching | Source pacing and retries still matter |
+| Kafka between ingestion and storage | Decouple publishing from downstream processing | Replayed messages require duplicate-aware handling |
+| PostgreSQL + Cassandra | Separate relational analysis from processed lap storage | Matching counts do not establish row-level equality |
+| Spark `AvailableNow` | Process available offsets and terminate | Finite execution rather than continuous live monitoring |
+| Persisted Spark checkpoints | Retain completed progress across task restarts | External sink writes still need replay-safe behavior |
+| Manual Airflow DAG | Make execution order and task outcomes inspectable | Automatic scheduling is not required for this version |
+| Separate dashboard mode | Reduce local resource pressure | The verified development laptop has 8 GB RAM |
+
+## Orchestration
+
+The `f1_pipeline` DAG uses a manual trigger, disabled catchup, and one active run:
+
+1. **`run_producer`** fetches historical sessions, drivers, and laps and publishes Kafka messages.
+2. **`run_consumer`** writes relational records into PostgreSQL and terminates after empty polls.
+3. **`run_spark_streaming`** processes available lap messages, filters and deduplicates within a batch, writes Cassandra, and persists checkpoint progress.
+
+![Successful three-task Airflow run](docs/screenshots/airflow-success.png)
+
+Recover a failed task by inspecting its current attempt and retrying the affected task within the existing run. Trigger a new run only when a new ingestion run is intended.
+
+## Data model and analytical rules
+
+### PostgreSQL grain
+
+| Table | Record grain | Logical uniqueness |
+|---|---|---|
+| `sessions` | One race or sprint session | `session_key` |
+| `drivers` | One driver in one session | `session_key`, `driver_number` |
+| `lap_times` | One numbered driver lap within a session | `session_key`, `driver_number`, `lap_number` |
+
+Join driver metadata to laps using **both session key and driver number**. Joining on driver number alone can multiply records across sessions.
+
+The Superset virtual dataset, **F1 2024 Lap Analytics**, joins these tables and exposes fields such as `session_label`, `driver_code`, `lap_time_seconds`, and sector durations. All timing metrics use seconds. PostgreSQL timestamps are stored without timezone information; retain an explicit interpretation of source timestamps when extending the model.
+
+### Cassandra processing
+
+Keyspace: `f1_data`.
+
+- **`lap_telemetry`** stores positive-duration lap records and associated sector, driver, session, out-lap, and timestamp fields.
+- **`race_gaps`** stores a lap-duration difference calculated against the fastest recorded duration for the same session and lap number within the processed batch.
 
 ```text
-lap_duration - fastest_lap_duration_for_same_session_and_lap_number
+lap-duration difference = driver lap duration − fastest duration for the same session/lap number
 ```
 
-This is ****not the cumulative gap to the race leader****. The current `race_gaps` name must not be used to imply live race position or cumulative interval accuracy.
+This difference measures an individual lap comparison. It is **not a cumulative time gap to the race leader**. The existing gap-table identity also needs improvement before relying on its row completeness.
 
-`is_pit_out_lap` identifies an out-lap. It does not establish pit-stop duration, tyre compound, complete strategy, or the number of actual stops without further source data.
+### Dashboard SQL
 
-## Analytics dashboard
+<details>
+<summary><strong>View the core metrics</strong></summary>
 
-****Dashboard:**** `F1 2024 — Season & Driver Analytics`  
-****Tool:**** Apache Superset  
-****Dataset:**** `F1 2024 Lap Analytics`  
-****Data source:**** PostgreSQL, with a virtual SQL dataset joining all three tables.
-
-| Component | Current behavior |
-|---|---|
-| Season overview cards | 24 races, 6 sprints, 29,052 recorded laps, 28,952 positive-duration laps |
-| Driver Median Lap Time | All drivers in one selected session, sorted ascending; positive durations only, excluding pit out-laps |
-| Driver Lap-Time Progression | Selected drivers in the selected session; positive durations, including pit out-laps and slow laps |
-| Driver Sector Comparison | Selected drivers; median positive sector durations, excluding pit out-laps |
-| Lap-Time Consistency | Selected drivers; lap-duration interquartile range, excluding pit out-laps |
-| Data Quality tab | 100 missing or nonpositive lap durations across the season |
-| Race / Sprint Session filter | Single session; Bahrain Race saved as default |
-| Compare Drivers filter | Multiple drivers; VER, NOR, HAM saved as defaults |
-| Featured driver portraits | Static VER, NOR, HAM reference cards with 2024 team labels |
-| Dashboard backup | Export ZIP and restore guide in `dashboards/` |
-
-The session filter reaches all four performance charts. The driver filter reaches
-progression, sector comparison, and consistency; the median chart retains all
-session drivers. Neither filter affects the season cards or quality-exception card.
-These behaviors were manually checked by switching sessions and drivers.
-
-Median lap time uses:
+Median lap time:
 
 ```sql
 PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY lap_time_seconds)
 ```
 
-Lap-time consistency uses the interquartile range:
+Lap-time consistency:
 
 ```sql
 PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY lap_time_seconds)
 - PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY lap_time_seconds)
 ```
 
-Lower spread means less variation in the middle 50% of recorded lap durations;
-it does not establish faster pace. Sector medians may come from different laps.
-Weather, traffic, safety cars, pit activity, and interruptions affect comparisons.
-Compare one session at a time rather than mixing raw timings across circuits.
+Example sector median:
 
-Portraits do not follow the driver filter. Their URLs may serve current imagery
-(for example, Hamilton in Ferrari clothing), while team labels refer to 2024.
-The Superset image policy permits `upload.wikimedia.org` and `media.formula1.com`
-while retaining the default policy. A complete team/logo/car gallery and dynamic
-portrait selection have not been implemented. Grafana remains a possible extension.
-
-Restore instructions: [dashboards/README.md](dashboards/README.md).
-The export contains definitions and layout, not PostgreSQL lap data.
-Import into a fresh installation has not yet been tested.
-
-### Visual walkthrough
-
-The Mermaid diagrams above are GitHub-rendered ****static diagrams****, not actual animation. An animated GIF can later be committed and embedded once recorded from the working system.
-
-### Driver comparison
-
-Bahrain Race with VER, NOR, and HAM selected. Season totals remain unchanged.
-
-![Driver comparison dashboard](docs/screenshots/driver-comparison.png)
-
-### Data quality
-
-Season-wide missing or nonpositive lap durations: **100**.
-This card remains independent of session and driver filters.
-
-![Data quality dashboard](docs/screenshots/data-quality.png)
-
-### Airflow orchestration
-
-Successful full-season run showing all three pipeline tasks completed.
-
-![Successful Airflow run](docs/screenshots/airflow-success.png)
-
-## Project structure
-
-| Path | Purpose |
-|---|---|
-| `ingestion/producer.py` | API fetching and Kafka publishing |
-| `ingestion/consumer.py` | Kafka consumption and PostgreSQL inserts |
-| `ingestion/db_setup.py` | PostgreSQL table creation |
-| `processing/spark_streaming.py` | Lap processing and Cassandra writes |
-| `orchestration/dags/f1_pipeline_dag.py` | Three-task Airflow DAG |
-| `docker/docker-compose.yml` | Services, networks, resource settings, volumes |
-| `docker/Dockerfile.airflow` | Java and Python dependencies for Airflow tasks |
-| `docker/Dockerfile.superset` | Superset with PostgreSQL driver |
-| `docker/superset_config.py` | Superset configuration |
-| `docker/superset.env` | Local secret; exclude from Git |
-| `dashboards/` | Export ZIP and dashboard restore guide |
-| `.env.example` | Sanitised host/pipeline settings |
-| `docker/superset.env.example` | Superset secret-key template |
-| `requirements.txt` | Pipeline Python dependencies |
-| `.env` | Local runtime settings; exclude from Git |
-
-## Local setup
-
-### Prerequisites
-
-- Docker Desktop with its Linux engine running.
-- Docker Compose v2.
-- Windows PowerShell and VS Code for the documented workflow.
-- Python 3.11 for optional host-side scripts.
-- Internet access for API requests and first-time image/JAR downloads.
-
-The verified environment is an 8 GB RAM laptop. This is a constrained local development setup, not a recommended production deployment.
-
-### Optional Windows Python environment
-
-From the project root:
-
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```sql
+PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY sector_1_seconds)
+FILTER (WHERE sector_1_seconds > 0)
 ```
 
-For a new installation, copy the committed templates:
+Duration exceptions:
+
+```sql
+COUNT(CASE
+    WHEN lap_time_seconds IS NULL OR lap_time_seconds <= 0
+    THEN 1
+END)
+```
+
+</details>
+
+## Repository guide
+
+| Path | Responsibility |
+|---|---|
+| `ingestion/producer.py` | OpenF1 fetching and Kafka publishing |
+| `ingestion/consumer.py` | Kafka consumption and PostgreSQL loading |
+| `ingestion/db_setup.py` | PostgreSQL table creation |
+| `processing/spark_streaming.py` | Lap transformations and Cassandra writes |
+| `orchestration/dags/f1_pipeline_dag.py` | Three-task orchestration |
+| `docker/docker-compose.yml` | Service configuration, networking, and volumes |
+| `docker/Dockerfile.airflow` | Airflow task runtime with Java and Python dependencies |
+| `docker/Dockerfile.superset` | Superset image with PostgreSQL driver |
+| `docker/superset_config.py` | Superset configuration and image-host policy |
+| `.env.example` | Sanitised pipeline and host environment template |
+| `docker/superset.env.example` | Superset secret-key template |
+| `dashboards/` | Dashboard export and restore guide |
+| `docs/screenshots/` | Dashboard and orchestration evidence |
+| `requirements.txt` | Python dependencies |
+
+## Run locally
+
+**Prerequisites:** Docker Desktop with its Linux engine running, Docker Compose v2, PowerShell, and network access for API requests and initial dependency downloads. Python 3.11 is needed for optional host scripts.
+
+The successful full-season run used initialized databases. **An end-to-end installation from empty volumes has not been tested, and Cassandra application schema provisioning remains to be packaged.** The steps below document configuration and service operation; they are not a claim of a fully automated fresh installation.
+
+### 1. Get the project
+
+```powershell
+git clone https://github.com/Lahiru1Niroosh/F1-Real-Time-Data-Pipline.git
+cd F1-Real-Time-Data-Pipline
+```
+
+### 2. Configure a new environment
+
+For a new setup only:
 
 ```powershell
 Copy-Item .env.example .env
 Copy-Item docker/superset.env.example docker/superset.env
 ```
 
-Replace password and secret placeholders before starting services. Keep
-`POSTGRES_DB=f1_db` and `POSTGRES_USER=f1_user` consistent with the current
-Compose file. Use a URL-safe database password with the current interpolated
-Airflow connection URI, or correctly encode it before changing that URI.
-Do not overwrite existing working environment files or rotate an existing
-Superset secret casually.
+Replace the password and secret placeholders. The current Compose file fixes the PostgreSQL database and user to `f1_db` and `f1_user`; keep the environment values consistent. Use a URL-safe password with the current interpolated Airflow URI, or encode credentials correctly if changing that URI.
 
-Host scripts use `localhost:9092`, `localhost:5432`, and `localhost` for Cassandra.
-Compose overrides container addresses with `kafka:29092`, `postgres`, and
-`cassandra`, and supplies the container checkpoint path. For host-side Spark,
-set `SPARK_CHECKPOINT_DIR` to a local folder. Do not publish real credentials.
-
-Every Compose command below explicitly loads the repository-root `.env`.
-Superset additionally loads `docker/superset.env` through its `env_file` setting.
-
-### Validate and build
-
-```powershell
-docker compose --env-file .env -f docker/docker-compose.yml config --quiet
-docker compose --env-file .env -f docker/docker-compose.yml build airflow-scheduler superset
-```
-
-Start storage services first:
-
-```powershell
-docker compose --env-file .env -f docker/docker-compose.yml up -d postgres kafka cassandra
-docker compose --env-file .env -f docker/docker-compose.yml ps
-```
-
-Wait for readiness before scheduling work. On a clean installation, initialize PostgreSQL tables using `ingestion/db_setup.py` and create the Cassandra keyspace/tables from the project's actual schema. The clean-install Cassandra schema provisioning procedure remains to be packaged; do not assume starting an empty Cassandra container creates application tables.
-
-The successful run used existing initialized databases. This README does not claim the clean-install workflow has been tested end to end.
-
-### Start orchestration and trigger a run
-
-```powershell
-docker compose --env-file .env -f docker/docker-compose.yml up -d --no-deps airflow-scheduler
-docker exec f1_airflow_scheduler airflow dags trigger f1_pipeline --run-id season_2024_run_001
-```
-
-Use a new run ID for a genuinely new run. Reusing an existing ID produces `DagRunAlreadyExists`. Do not repeatedly trigger runs to recover one failed task.
-
-```powershell
-docker exec f1_airflow_scheduler airflow tasks states-for-dag-run f1_pipeline season_2024_run_001
-```
-
-### First-time Superset initialization
-
-For a new Superset installation, generate a random key and place it in
-`docker/superset.env` as `SUPERSET_SECRET_KEY=<generated value>`:
+Generate a Superset secret for a new installation:
 
 ```powershell
 py -3.11 -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-Retain that key across restarts. Skip generation for an existing installation.
+Place the generated value in `docker/superset.env` as `SUPERSET_SECRET_KEY`. Keep existing working environment files and Superset secrets unchanged when returning to an initialized installation. Real environment files stay outside Git.
+
+Optional host Python environment:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+### 3. Validate and build
+
+Every Compose command explicitly loads the root `.env`. Superset separately loads `docker/superset.env` through Compose's `env_file` setting.
+
+```powershell
+docker compose --env-file .env -f docker/docker-compose.yml config --quiet
+docker compose --env-file .env -f docker/docker-compose.yml build airflow-scheduler superset
+docker compose --env-file .env -f docker/docker-compose.yml up -d postgres kafka cassandra
+docker compose --env-file .env -f docker/docker-compose.yml ps
+```
+
+Wait for storage readiness. Create PostgreSQL tables with `ingestion/db_setup.py` where needed. Provision the actual Cassandra keyspace and table definitions before starting Spark; an empty Cassandra container does not create application tables automatically. Airflow metadata must also be initialized before scheduling.
+
+### 4. Run the pipeline on an initialized environment
+
+```powershell
+docker compose --env-file .env -f docker/docker-compose.yml up -d --no-deps airflow-scheduler
+docker exec f1_airflow_scheduler airflow dags trigger f1_pipeline --run-id season_2024_run_001
+docker exec f1_airflow_scheduler airflow tasks states-for-dag-run f1_pipeline season_2024_run_001
+```
+
+Choose a unique run ID for each new run. For recovery, inspect and retry the failed task rather than repeatedly publishing the season again.
+
+### 5. Initialize Superset once
+
+After configuring its secret and building the image:
 
 ```powershell
 docker compose --env-file .env -f docker/docker-compose.yml run --rm --no-deps superset superset db upgrade
 docker compose --env-file .env -f docker/docker-compose.yml run --rm --no-deps superset superset fab create-admin
 docker compose --env-file .env -f docker/docker-compose.yml run --rm --no-deps superset superset init
-docker compose --env-file .env -f docker/docker-compose.yml up -d --no-deps superset
+docker compose --env-file .env -f docker/docker-compose.yml up -d --no-deps postgres superset
 ```
 
-Use the interactive admin command to choose local credentials. Connect PostgreSQL in Superset using host `postgres`, port `5432`, and your configured database/user/password. SQLite persists Superset's local metadata in `superset_home`; F1 records remain in PostgreSQL. SQLite is a local portfolio choice, not the production metadata architecture.
+Connect Superset to `postgres:5432`, database `f1_db`, user `f1_user`, with the local database password. Follow the [dashboard restore guide](dashboards/README.md) to import the export. A fresh-instance import remains untested.
 
-## Daily startup and shutdown
+### Service addresses
 
-### Dashboard work only
+| Service | Windows host | Docker clients |
+|---|---|---|
+| Superset | `http://localhost:8088` | `superset:8088` |
+| Airflow webserver | `http://localhost:8080` | `airflow-webserver:8080` |
+| Kafka | `localhost:9092` | `kafka:29092` |
+| PostgreSQL | `localhost:5432` | `postgres:5432` |
+| Cassandra | `localhost:9042` | `cassandra:9042` |
 
-Start Docker Desktop, wait for the engine, open the project, then:
+Compose overrides pipeline container hostnames and supplies the container Spark checkpoint path. Host-side Spark requires a local `SPARK_CHECKPOINT_DIR`. Inside a container, `localhost` refers to that container.
+
+## Everyday operation
+
+**Dashboard mode** uses PostgreSQL and Superset only; no ingestion rerun or Python environment activation is needed:
 
 ```powershell
 docker compose --env-file .env -f docker/docker-compose.yml up -d --no-deps postgres superset
 ```
 
-Visit [Superset](http://localhost:8088). No Python environment activation, image rebuild, or ingestion rerun is needed for ordinary dashboard editing.
-
-### Viewing existing Airflow runs
+**Inspect existing Airflow history** when its container already exists and PostgreSQL is running:
 
 ```powershell
 docker start f1_airflow_web
 ```
 
-Visit [Airflow](http://localhost:8080). A stale scheduler-heartbeat warning is expected when the scheduler is intentionally stopped. Existing task history can still be inspected; new work will not be scheduled.
+A scheduler warning is expected if the scheduler is intentionally stopped; history remains available, but new tasks will not be scheduled.
 
-### Clean shutdown
-
-Save charts and dashboard layouts first, then:
+**Stop cleanly** after saving dashboard changes:
 
 ```powershell
 docker compose --env-file .env -f docker/docker-compose.yml stop -t 60
 ```
 
-Wait for completion before quitting Docker Desktop or shutting down Windows. ****Do not use `down -v` when retaining project data.**** Named volumes persist through ordinary stops; they are not a backup against disk failure or deliberate volume deletion.
+Named volumes retain broker data, PostgreSQL data and Airflow metadata, Cassandra records, logs, Spark checkpoints, and Superset metadata. Ordinary stops preserve them. Avoid `down -v` when retaining project data. Volumes provide persistence, not an independent backup; changing the Compose project name can select different volumes.
 
-### Persistent volumes
+## Verification
 
-| Volume | Retained content |
-|---|---|
-| `kafka_data` | Kafka broker data |
-| `postgres_data` | Relational data and Airflow metadata |
-| `cassandra_data` | Cassandra data |
-| `airflow_logs` | Task logs |
-| `spark_checkpoints` | Spark progress and query recovery state |
-| `superset_home` | Superset dashboard/configuration metadata |
+### Observed full-season outcome
 
-Compose may prefix volume names with its project name. Changing project names or Compose locations can select different volumes; verify before assuming data is missing.
+| Check | Result |
+|---|---:|
+| Race sessions with stored laps | 24 |
+| Sprint sessions with stored laps | 6 |
+| Total sessions with stored laps | 30 |
+| PostgreSQL recorded laps | 29,052 |
+| PostgreSQL positive-duration laps | 28,952 |
+| Cassandra `lap_telemetry` rows | 28,952 |
+| Missing / nonpositive durations | 100 |
+| Airflow producer, consumer, Spark tasks | All successful |
 
-## Validation
+Reference run: `full_season_2024_20261002`. Dashboard filter scopes were also manually checked by switching sessions and drivers while observing unchanged season and quality totals.
 
-### PostgreSQL counts
+The successful Spark batch read **67,152 valid lap messages**, including earlier replays, and reported **28,952 lap writes** after batch-level deduplication. Its reported gap writes are not a verified count of distinct `race_gaps` rows.
+
+These observations establish task success, observed season coverage, and matching positive-duration lap counts. Row-level equivalence and exactly-once delivery remain outside the current verification.
+
+<details>
+<summary><strong>Run the manual count checks</strong></summary>
+
+PostgreSQL:
 
 ```powershell
 docker exec f1_postgres psql -U f1_user -d f1_db -c "SELECT COUNT(*) AS total_laps, COUNT(*) FILTER (WHERE lap_duration > 0) AS valid_laps, COUNT(DISTINCT session_key) AS sessions FROM lap_times;"
 ```
 
-### Session coverage
+Cassandra:
+
+```powershell
+docker exec f1_cassandra cqlsh -e "SELECT COUNT(*) FROM f1_data.lap_telemetry;"
+```
+
+The Cassandra full-table count is a small manual verification query, not a scalable dashboard access pattern.
+
+Session coverage:
 
 ```sql
 SELECT s.session_key, s.session_name, s.country_name,
-       s.circuit_name, COUNT(l.lap_id) AS laps
+       s.circuit_name, COUNT(l.lap_id) AS laps
 FROM sessions s
 LEFT JOIN lap_times l USING (session_key)
 WHERE s.year = 2024
@@ -508,92 +361,57 @@ GROUP BY s.session_key, s.session_name, s.country_name, s.circuit_name
 ORDER BY s.session_key;
 ```
 
-### Cassandra count
+</details>
 
-```powershell
-docker exec f1_cassandra cqlsh -e "SELECT COUNT(*) FROM f1_data.lap_telemetry;"
-```
+## Dashboard backup
 
-Cassandra warns about aggregation without a partition key. A full-table count is acceptable for this small manual verification, not a scalable dashboard query pattern.
+Export: [`dashboard_export_20261004T063550 (1).zip`](dashboards/dashboard_export_20261004T063550%20%281%29.zip).
 
-### Task logs
+The export preserves dashboard layout, chart definitions, dataset definitions, and filter configuration. PostgreSQL lap data must be supplied separately. Database credentials were inspected locally and reported masked before publishing.
 
-Use a specific attempt number to avoid confusing historical failures with the current attempt:
+Superset's metadata uses SQLite in the persisted `superset_home` volume for this local implementation. F1 records remain in PostgreSQL. Image configuration preserves the default Talisman policy and permits Wikimedia and Formula 1 media hosts for supporting assets.
 
-```powershell
-docker exec f1_airflow_scheduler tail -n 40 /opt/airflow/logs/dag_id=f1_pipeline/run_id=season_2024_run_001/task_id=run_spark_streaming/attempt=1.log
-```
+## Engineering roadmap
 
-### Troubleshooting
+The current version demonstrates a working local data pipeline and analytical workspace. The next improvements target reliability and reproducibility.
 
-| Symptom | Interpretation / response |
+| Area | Current boundary | Next improvement |
+|---|---|---|
+| **Consumer delivery** | Automatic Kafka commits are not transactionally coupled to PostgreSQL writes; insert errors can leave missed records | Commit after successful writes and add durable error handling |
+| **Producer delivery** | Sends are asynchronous | Verify acknowledgments and surface publishing failures |
+| **Spark sink** | Deduplicated batches are collected into driver memory | Use a distributed sink and validate replay-safe writes |
+| **Duplicate selection** | Batch-scoped; conflicting payload selection is nondeterministic | Define deterministic conflict resolution and cross-run behavior |
+| **Gap analytics** | Fastest-per-lap is batch-scoped; gap-related row identity can lose ties or retain stale values | Migrate to stable driver-based keys and validate semantics |
+| **Reproducibility** | Existing databases were used; Cassandra provisioning is not packaged | Commit schema setup and test empty-volume installation and dashboard import |
+| **Quality and operations** | Manual counts and task checks | Add row-level reconciliation, automated checks, backups, and monitoring |
+| **Deployment** | Single-node local services, plaintext Kafka, SQLite BI metadata | Introduce appropriate authentication, metadata storage, replication, and resource planning |
+
+Live race ingestion, dynamic portrait cards, and additional observability are optional extensions after the reliability foundations are improved.
+
+<details>
+<summary><strong>Operational troubleshooting</strong></summary>
+
+| Symptom | First check |
 |---|---|
-| API HTTP 429 | Respect `Retry-After`, reduce request frequency, avoid overlapping producer runs |
-| Per-driver lap request HTTP 404 | Inspect the source request; session-wide requests avoid that particular request shape without silently skipping a session |
-| PostgreSQL rejects connections after power loss | Inspect recovery logs and wait for readiness before restarting tasks |
-| Cassandra `NoHostAvailable` | Inspect service readiness, connectivity, and connection timeout |
-| Cassandra write timeout | Inspect load; use small write batches and bounded request timeout; retry affected task |
-| Spark task stays running | Inspect current attempt log; task state alone is not evidence of progress |
-| Airflow UI empty response | Container running does not guarantee Gunicorn readiness; inspect current logs and worker lifecycle |
-| Airflow master timeout | Investigate startup/resource pressure; timeout adjustment is a mitigation, not proof of the root cause |
-| `curl` behaves unexpectedly in PowerShell | Use `curl.exe` explicitly |
-| Scheduler not running warning | Expected when intentionally stopped; start it only when scheduling work |
+| OpenF1 HTTP 429 | Respect retry guidance, reduce frequency, avoid overlapping producers |
+| Cassandra connection or write timeout | Readiness, connectivity, and memory/write pressure |
+| Spark task remains running | Current attempt logs and checkpoint progress |
+| Airflow UI gives an empty response | Gunicorn readiness and local resource pressure |
+| PostgreSQL rejects connections after power loss | Recovery logs and storage readiness |
+| External dashboard image fails | Browser CSP error and permitted image host |
+| Compose reports missing variables | Run from the root with `--env-file .env` |
+| Existing data appears missing | Compose project name and the selected persisted volumes |
 
-For an existing failed Spark task, clear ****only that task**** using the failed run's exact logical date:
+Task state alone is not proof of data progress. Preserve checkpoints unless planning and validating a deliberate replay.
 
-```powershell
-docker exec f1_airflow_scheduler airflow tasks clear f1_pipeline --task-regex '^run_spark_streaming$' --start-date 'RUN_LOGICAL_DATE' --end-date 'RUN_LOGICAL_DATE' --yes
-```
+</details>
 
-Replace the date placeholders with the actual run timestamp. Preserve the checkpoint unless deliberately planning and validating a replay.
+## Author and acknowledgments
 
-## Known limitations
+**Lahiru Niroshan Sathsara** — Database Administration · SQL · Data Engineering
 
-- The Kafka and Cassandra deployments are single-node local instances, without production replication/high availability.
-- Kafka uses plaintext networking; local demo credentials and published ports require hardening before deployment.
-- The consumer currently uses automatic Kafka offset commits and catches insert errors. Offsets are not transactionally coupled to PostgreSQL writes, so failed records can be missed. Production hardening requires durable error handling and commit-after-success behavior.
-- Producer sends are asynchronous; acknowledgment/error verification needs review before claiming lossless ingestion.
-- Spark collects a deduplicated batch into driver memory; this is not a scalable distributed Cassandra sink.
-- Duplicate selection inside a batch is not deterministic when payloads for the same key differ.
-- Fastest-per-lap calculations are batch-scoped. Splitting related drivers across batches requires revisiting that calculation.
-- The current `race_gaps` schema uses a gap-related clustering key, which can overwrite tied values or retain stale values. A stable driver-based identity and schema migration are needed before relying on gap-row completeness.
-- The pipeline's row-error handling and write counters need further hardening; successful task state alone should not substitute for data reconciliation.
-- UI startup and scheduler heartbeats have been unstable under local resource pressure. An 8 GB laptop benefits from running pipeline and dashboard modes separately.
-- Monitoring metrics, alerts, backups, clean-install automation, automated quality checks, and row-level reconciliation are not completed.
+Built as an independent educational portfolio project using [OpenF1](https://openf1.org/docs/) data and open-source data infrastructure.
 
-## Roadmap
+Third-party data, portraits, logos, and trademarks retain their respective rights. This project is not an official Formula 1 product. No project software license has been selected; review licensing before reuse.
 
-- [x] Windows Python 3.11 development environment.
-- [x] Dockerized API ingestion and Kafka networking.
-- [x] Full 2024 race and sprint coverage observed.
-- [x] PostgreSQL loading and session coverage verification.
-- [x] Java-enabled Spark runtime and persistent checkpoints.
-- [x] Successful finite Spark run writing Cassandra.
-- [x] Matching positive-duration lap counts.
-- [x] Superset installation, PostgreSQL connection, and virtual dataset.
-- [x] Four season overview cards.
-- [x] Complete driver comparison chart and interactive session/driver filters.
-- [x] Add lap trends, sector comparisons, consistency, and data-quality views.
-- [x] Add static featured-driver portraits and organise dashboard tabs.
-- [ ] Add complete team/car imagery or dynamic driver cards if useful.
-- [x] Export dashboard and add restore documentation and environment templates.
-- [ ] Test dashboard import on a fresh installation and commit screenshots.
-- [ ] Repair gap-table identity and validate analytical semantics.
-- [ ] Harden offset commits, Kafka acknowledgments, and error handling.
-- [ ] Package Cassandra schema and test clean installation.
-- [ ] Add row-level reconciliation, backups, and automated checks.
-- [ ] Add a focused Grafana extension if it provides distinct analytical value.
-- [ ] Package GitHub repository and final portfolio evidence.
-
-## Sources and acknowledgments
-
-- [OpenF1 documentation](https://openf1.org/docs/) — source data and API definitions.
-- [Apache Airflow documentation](https://airflow.apache.org/docs/apache-airflow/2.9.3/) — orchestration.
-- [Apache Spark documentation](https://spark.apache.org/docs/3.4.1/) — streaming execution.
-- [Apache Superset documentation](https://superset.apache.org/) — analytics tooling.
-- [Cassandra Python driver documentation](https://docs.datastax.com/en/developer/python-driver/3.29/) — client configuration.
-
-This is an independent educational portfolio project, not an official Formula 1 product. Third-party data, images, trademarks, and logos retain their respective rights. No project software license has been selected here; add a license intentionally before inviting reuse.
-
-****Author:**** Lahiru Niroshan Sathsara  
-****Documentation reflects verified work through:**** 4 October 2026.
+**Documentation milestone:** 4 October 2026.

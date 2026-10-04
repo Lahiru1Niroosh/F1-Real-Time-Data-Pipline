@@ -325,6 +325,12 @@ This card remains independent of session and driver filters.
 
 ![Data quality dashboard](docs/screenshots/data-quality.png)
 
+### Airflow orchestration
+
+Successful full-season run showing all three pipeline tasks completed.
+
+![Successful Airflow run](docs/screenshots/airflow-success.png)
+
 ## Project structure
 
 | Path | Purpose |
